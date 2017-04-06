@@ -1,0 +1,223 @@
+---
+title: "Сегментация пользователей"
+author: "Алексей Найденов"
+date: '12 октября 2016 г '
+output: 
+  html_document: 
+    highlight: tango
+    number_sections: yes
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(dplyr)
+library(corrplot)
+library(ggplot2)
+```
+
+#Загрузка данных
+Загрузим данные, связанные с описанием товаров и категорий.
+
+```{r products&categories, echo = TRUE}
+products <- read.csv("products.csv", sep=';', encoding="UTF-8")
+product.categories <- read.csv("product-categories.csv", sep=';', encoding="UTF-8")
+categories <- read.csv("categories.csv", sep=';', encoding="UTF-8")
+```
+
+Загрузим данные, связанные с историей просмотров и заказов.
+
+```{r purchases&item.views, echo = TRUE}
+purchases <- read.csv("purchases.csv", sep=';', encoding="UTF-8")
+item.views <- read.csv("item-views.csv", sep=';', encoding="UTF-8")
+category.views <- read.csv("category-views.csv", sep=';', encoding="UTF-8")
+item.views$eventdate = as.Date(item.views$eventdate)
+purchases$eventdate = as.Date(purchases$eventdate)
+```
+
+#Сегментация пользователей
+При составлении схемы сегментации потребителей обычно используют две группы переменных [Kotler, 2006](https://www.amazon.com/Marketing-Management-12th-Philip-Kotler/dp/0131457578):
+
+ - поведение;
+ - описательные характеристики.
+
+Так же выделим отдельно сегментацию по целям/результатам.
+История просмотров и заказов. пользователей позволяет провести сегментацию пользователей на основе их поведения, их целей и результата посещения интернет магазина.
+
+#Уникальные пользователи
+В данной работе будем рассматривать каждую уникальную сессиию как индивидуального пользователя, в предположении о том, что по истечении времени срока сессии вкусы и поведение пользователя могли измениться.
+Выберем всех уникальных пользователей из историй просмотров и заказов.
+
+```{r visitors, echo = TRUE}
+visitors <- data.frame(
+  externalsessionid = unique(
+    c(purchases$externalsessionid,
+      item.views$externalsessionid, 
+      category.views$externalsessionid)))
+nrow(visitors)
+```
+В итоге, имеем 22881 пользователей, которые необходимо сегментировать.
+
+#Выделение переменных
+
+##Поведение
+
+Выделим следующие переменные, соответствующие поведению пользователя:
+
+ - общее время сессии 
+ - число посещений - число уникальных дней просмотров за все время сессии
+ - число просмотров - число уникальных просмотров за все время сессии
+ - частота просмотров - число просмотров за один день активности сессии  
+ - частота посещения - число посещений за один день активности сессии  
+ - число просмотренных продуктов
+ - среднее время просмотра продукта
+ 
+```{r behavior, echo = TRUE}
+behavior <- visitors %>% 
+  left_join(item.views %>% 
+              group_by(externalsessionid) %>% 
+              summarise(period = sqrt(as.numeric(max(eventdate) - min(eventdate)) + 1),
+                        mean.product.view.freq = sqrt(n() / period),
+                        n.product.view.total = sqrt(n()),
+                        n.login.days = length(unique(eventdate)),
+                        mean.login.freq = n.login.days / period,
+                        n.product.view.total = length(unique(product_id)),
+                        mean.product.view.duration = mean(duration)
+              ), by = "externalsessionid"
+  )
+```
+
+Заметим, что некоторые переменные были модифицрованы, т.е. взято не само значение, а квадратные корень. Это позволяет более явно выделить сегменты, не нарушая интерпретируемость результатов.
+
+##Цель/результат посещения
+
+Выделим следующие переменные, соответствующие целям и результатам посещения:
+
+ - число заказов
+ - общая сумма заказов
+ - средняя сумма заказа
+ - частота заказов
+ - время первого заказа с момента первого просмотра
+ 
+Эти переменные характерны тем, что у некоторых пользователей отсутствуют значения - если пользователь не сделал ни одного заказа. Не нарушая логики, заполняем пропуски значением (кроме `времени первого заказа с начала просмотра`)
+ 
+ 
+```{r outcome, echo = TRUE}
+outcome <- visitors %>% 
+  left_join(
+    purchases %>% 
+      group_by(externalsessionid) %>% 
+      summarise(n.orders = length(unique(ordernumber)),
+                sum.totalcents=sum(totalcents),
+                fisrt.purchasedate = min(eventdate)),
+    by="externalsessionid"
+  ) %>% 
+  left_join(item.views %>% 
+              group_by(externalsessionid) %>% 
+              summarise(fisrt.eventdate = min(eventdate),# дата первого просмотра
+                        period = sqrt(as.numeric(max(eventdate) - min(eventdate)) + 1) # число просмотренных продуктов
+              ), by = "externalsessionid"
+  ) %>% 
+  mutate(choose.time = ifelse(fisrt.purchasedate >= fisrt.eventdate, 
+                              fisrt.purchasedate - fisrt.eventdate, 
+                              0),
+         n.orders = ifelse(!is.na(n.orders), n.orders, 0),
+         sum.totalcents = ifelse(!is.na(sum.totalcents), sum.totalcents, 0),
+         mean.check = ifelse(n.orders != 0, 
+                             sum.totalcents / n.orders, 
+                             0),
+         mean.order.freq = ifelse(!is.na(n.orders), n.orders / period, 0))
+```
+
+##Отбор независимых переменных
+Соединим оба набора данных (по ключу `externalsessionid`) и уберем сильно кореллируемые переменные.
+
+```{r corr, echo = TRUE}
+correlations <- cor(outcome %>% 
+                      select(-period) %>% 
+                      left_join(behavior,
+                                by="externalsessionid") %>% 
+                      select(-externalsessionid,-fisrt.purchasedate, -fisrt.eventdate, -choose.time, -period))
+corrplot(correlations, method="square", order="hclust")
+```
+
+```{r corr_opt, echo = TRUE}
+data <- outcome %>% 
+  select(-period) %>% 
+  left_join(behavior,
+            by="externalsessionid") %>% 
+  select(externalsessionid,
+         mean.product.view.duration,
+         period,
+         mean.product.view.freq,
+         n.product.view.total,
+         sum.totalcents,
+         mean.order.freq)
+correlations <- cor(data %>% 
+                      select(-externalsessionid))
+corrplot(correlations, method="square", order="hclust")
+```
+
+#Кластеризация
+В итоге получаем набор из 6 некореллируемых переменных. Используем алгоритм кластеризации K-Means, чтобы выделить кластеры в наборе данных. Эмпирически было подобрано оптимальное число кластеров - 4.
+```{r clusters, echo = TRUE, cache=TRUE}
+cluster2 <- kmeans(data %>% 
+                      select(-externalsessionid) %>% 
+                      apply(2, scale), 4, nstart = 20)
+```
+
+#Интерпретация результатов
+```{r segments, echo=FALSE}
+labels <- c("Заинтересованные",
+            "Пассивные",
+            "Новые",
+            "Активные")
+caption <- "Посетители"
+```
+
+Представленные ниже графики построены в таких координатных осях, что позволяют визально определить интерпретацию выделенных кластеров посетителей. В этому случае сегменты пользователей имеют следующие характеристики:
+
+1. **Заинтересованные посетители.** Почти нулевая сумма заказа, малое время просмотра и общее время сессии при сравнительно высокой частоте просмотров. Посетители данного сегмента недавно на сайте, и еще не определились со своим выбором и целями.
+
+1. **Пассивные посетители.** Большое общее время сессии, средняя сумма заказов, низкая частота просмотров. Посетители сделали свою покупку и с меньшей вероятностью собираются возвращаться с заказом в ближайшее время.
+
+1. **Определившиеся посетители.** Большое среднее время просмотра товаров при низкой частоте просмотров говорит о том, что посетители пришли целенаправленно и определяются (или уже определились) со своим выбором (среди набора альтернатив, например).
+
+1. **Активные посетители.** Большое сумма заказов при низкой частоте просмотров и времени сессии. Посетители уже знают, что им нужно, скорее всего уже совершали покупки еще до начала текущей сессии и лояльны к магазину.
+
+```{r plot1}
+ggplot(data, aes(x=mean.product.view.duration, 
+                  y=mean.product.view.freq)) + 
+  geom_point(aes(color=factor(cluster2$cluster))) +
+  labs(x = "Среднее время просмотра", y = "Частота просмотров") + 
+  scale_colour_discrete(name=caption,
+                        labels=labels)
+```
+```{r plot2}
+ggplot(data, aes(x=sqrt(n.product.view.total), 
+                  y=period)) + geom_point(aes(color=factor(cluster2$cluster))) +
+  labs(x = "Общее число просмотров (корень)", y = "Общее время сессии") + 
+  scale_colour_discrete(name=caption,
+                        labels=labels)
+```
+```{r plot3}
+ggplot(data, aes(x=period,
+                 y=sum.totalcents)) +  geom_point(aes(color=factor(cluster2$cluster))) +
+  labs(x = "Общее время сессии", y = "Общая сумма заказов") + 
+  scale_colour_discrete(name=caption,
+                        labels=labels)
+```
+```{r plot4}
+ggplot(data, aes(x=mean.product.view.freq, 
+                 y=sum.totalcents)) +  geom_point(aes(color=factor(cluster2$cluster))) +
+  labs(x = "Частота просмотров", y = "Общая сумма заказов") + 
+  scale_colour_discrete(name=caption,
+                        labels=labels)
+```
+
+
+

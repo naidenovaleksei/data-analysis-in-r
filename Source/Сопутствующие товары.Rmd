@@ -1,0 +1,219 @@
+---
+title: "Сопутствующие товары"
+author: "Алексей Найденов"
+date: '11 октября 2016 г '
+output: 
+  html_document: 
+    highlight: tango
+    number_sections: yes
+    #theme: united
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(dplyr)
+library(arules)
+library(arulesViz)
+library(ggplot2)
+```
+
+#Загрузка данных
+Загрузим данные, связанные с описанием товаров и категорий.
+
+```{r products&categories, echo = TRUE}
+products <- read.csv("products.csv", sep=';', encoding="UTF-8")
+product.categories <- read.csv("product-categories.csv", sep=';', encoding="UTF-8")
+categories <- read.csv("categories.csv", sep=';', encoding="UTF-8")
+```
+
+#Зависимости между категориями заказанных товаров в разрере уникальных заказов
+Загрузим таблицу, которая содержит историю заказов магазина
+
+```{r purchases, echo = TRUE}
+purchases <- read.csv("purchases.csv", sep=';', encoding="UTF-8")
+names(purchases)
+```
+В данной таблице нас интересует только уникальный номер заказа (`ordernumber`) и уникальный номер заказанного товара (`product_id`)
+Выделив необходимое, добавим номер и имя категории (`category_id` и `name`, соответственно), в которой находится заказанный товар
+
+```{r purchases_ordernumber, echo = TRUE}
+ordered.categories <- purchases %>% 
+  select(ordernumber, product_id) %>%
+  left_join(product.categories,
+            by=c("product_id" = "product_id")) %>% 
+  left_join(
+    select(categories, category_id, name), 
+    by = c("category_id" = "category_id")
+  )
+head(ordered.categories)
+```
+Полученный набор данных однозначно определяет множество транзакций - заказанных товаров "в одной корзине". Каждая строка соответствует одному товару, включенному в соответствующий заказ. В этом случае задача поиска зависимостей между категориями в разрезе заказов сводится к нахождению ассоциативных правил между категориями в транзакции.
+
+Мы будем искать зависимости между категориями, а не товарами (что, логично, должно привести к более общей модели), следовательно, выделим только номер уникального заказа и имя категории, которой принадлежит товар соответствующего заказа. 
+
+```{r purchases_ordernumber_ready, echo = TRUE}
+ordered.categories <- ordered.categories %>% 
+  select(ordernumber, name)
+head(ordered.categories)
+write.csv(ordered.categories, 'purchases_transaction.csv', row.names=F)
+```
+Сохраняем полученный набор отдельно в файл.
+
+Для поиска ассоциативных правил используем пакет `arules`. 
+1. Открываем только что сохраненный файл, но уже в другом формате (с параметром `format="single"`), что позволяет работать с полученным набором как с транзакциями;
+1. Задаем необходимые параметры для поиска ассоциативных правил. Ввиду того, что данных не так много относительно категорий, то правила имеют низкую [поддержку](https://habrahabr.ru/post/66016/);
+1. Используем алгоритм APRIORI для выделения правил;
+
+```{r rules, echo = TRUE}
+purchases_transaction <- read.transactions("purchases_transaction.csv", 
+                                            format="single", 
+                                            sep = ",", 
+                                            rm.duplicates = F,
+                                            encoding="UTF-8", 
+                                            cols=c("ordernumber", "name"))
+MIN_SUPPORT = 0.003
+MIN_CONFIDENCE = 0.09
+rules <- apriori(purchases_transaction, 
+                 parameter = list (supp = MIN_SUPPORT, conf = MIN_CONFIDENCE, target = 'rules'),
+                 appearance = list(default="both"),
+                 control = list(verbose=F))
+```
+
+Для более удобного отображения построим граф ассоциативных правил.
+
+```{r plot.rules, echo = TRUE}
+plot(rules, method="graph")
+
+```
+
+Из построенного графа видно, что существуют определенные зависимости между смежными категориями, либо между основной и дополнительной категориями.
+1. Между смежными категориями. Например, связь видна между `стиральными машинами` и `холодильниками`, а также между категориями - `варочной поверхностью`, `духовыми шкафами`, `вытяжками`. Это значит, что если клиенты покупает за раз более одного товара, то в большинстве случаев это крупная бытовая или кухонная техника.
+1. Между основной и зависимой категориями. Под `детскую кровать` клиенты сразу могут купить `матрас`, вместе с `колесными дисками` покупают `шины`, для `телевизоров` сразу смотрят `кронштейны` и крепежи для них.
+
+Также, давайте рассмотрим зависимости, учитывая тот факт, что один и тот же клиент может совершать несколько заказов, в разное время.
+
+#Зависимости между категориями заказанных товаров в разрезе уникальных клиентов
+Выполним те же действия, но выделим не номер заказа (`ordernumber`), а идентификатор клиента (`externalsessionid`).
+
+```{r purchases_externalsessionid, echo = TRUE}
+purchases %>% 
+  select(externalsessionid, product_id) %>%
+  left_join(product.categories,
+            by=c("product_id" = "product_id")) %>% 
+  left_join(
+    select(categories, category_id, name), 
+    by = c("category_id" = "category_id")
+  ) %>% 
+  select(externalsessionid, name) %>%
+  mutate(externalsessionid = factor(externalsessionid)) %>% 
+  write.csv('purchases_transaction2.csv', row.names=F)
+
+purchases_transaction2 <- read.transactions("purchases_transaction2.csv", 
+                                            format="single", 
+                                            sep = ",", 
+                                            rm.duplicates = F,
+                                            encoding="UTF-8", 
+                                            cols=c("externalsessionid", "name"))
+rules2 <- apriori(purchases_transaction2, 
+                 parameter = list (supp = MIN_SUPPORT, conf = MIN_CONFIDENCE, target = 'rules'),
+                 appearance = list(default="both"),
+                 control = list(verbose=F))
+plot(rules2, method="graph")
+```
+
+Более высокая поддержка и лифт выделенных правил показывает, что связи стали более явными, но приблизительно между теми же категориями.
+Это объясняет поведение клиента:
+1. Клиент в большей степени готов выполнить новый заказ в том же магазине, что и в первый раз.
+1. Клиент часто не готов купить сразу все необходимое, а покупает по частям.
+
+
+#Зависимости между категориями просматриваемых товаров в разрезе уникальных клиентов
+```{r item.views, echo = TRUE}
+item.views <- read.csv("item-views.csv", sep=';', encoding="UTF-8")
+item.views %>% 
+  filter(!is.na(product_id)) %>% 
+  select(externalsessionid, product_id) %>%
+  left_join(product.categories,
+            by=c("product_id" = "product_id")) %>% 
+  select(externalsessionid, category_id) %>%
+  left_join(categories,
+            by=c("category_id" = "category_id")) %>% 
+  select(externalsessionid, name) %>%
+  write.csv('item.views_transaction.csv', row.names=F)
+
+item.views_transactions <- read.transactions("item.views_transaction.csv", 
+                                        format="single", 
+                                        sep = ",", 
+                                        rm.duplicates = F,
+                                        encoding="UTF-8", 
+                                        cols=c("externalsessionid", "name"))
+item.views_rules <- apriori(item.views_transactions, 
+                       parameter = list (supp = MIN_SUPPORT, conf = MIN_CONFIDENCE, target = 'rules'),
+                 appearance = list(default="both"),
+                 control = list(verbose=F))
+plot(item.views_rules, method="graph")
+```
+
+Низкий лифт выделенных ассоциативных правил, их общее количество могут говорить о большей хаотичности поведения пользователей (что естественно, за просмотры клиент ничего не платит). В целом зависимости между категориями остаются прежними, но наблюдаются интересные моменты:
+1. Выделяются зависимости между ранее связанными подмножествами категорий. История просмотров говорит о том, клиент реже останавливается на поиске определенного товара (техники), а рассматривает все категории в определенной области человеческой жизни, пытаясь представить картину в целом. Вместе с кухонной техникой смотрят на `холодильники`, `телевизоры`, `электрические плиты` и т.д.
+1. При просмотре клиент в меньшей степени смотрит на зависимые категории - `кронштены для телевизоров`, `матрасы для детских кроватей` и т.д. 
+
+
+#Зависимости внутри категорий заказанных товаров в разрезе уникальных клиентов
+Последнее, попытаемся найти связи внутри категории при покупках товаров. Для этого рассмотрим для каждой категории среднюю цену товаров, содержащихся в ней, а также среднее число товаров этой категории в чеках каждого клиента. Отобразим их зависимость на графике, добавив цветом основную категорию, которой принадлежит данная категория.
+
+```{r purchases_inside}
+
+categories2 <- categories %>% 
+  merge(
+    products %>% 
+      merge(product.categories, all.x=T) %>% 
+      select(price, category_id) %>% 
+      group_by(category_id) %>% 
+      summarise(price=mean(price))
+    ) %>% 
+  left_join(categories %>% 
+              select(category_id, parent_id),
+            by=c("parent_id" = "category_id")) %>% 
+  rename(grandparent_id=parent_id.y) %>% 
+  left_join(categories %>% 
+              select(category_id, name),
+            by=c("grandparent_id" = "category_id")) %>% 
+  rename(common_category=name.y, name=name.x) %>%
+  select(-grandparent_id, -link_url)
+
+x <- purchases %>% 
+  select(externalsessionid, product_id) %>%
+  left_join(product.categories, all.x=T,
+            by = "product_id") %>% 
+  left_join(
+    select(categories2, category_id, name, price),
+    by = "category_id"
+  ) %>% 
+  select(externalsessionid, name, price) %>%
+  group_by(externalsessionid, name) %>% 
+  summarise(count = n()) %>% 
+  group_by(name) %>% 
+  summarise(freq = mean(count)) %>% 
+  left_join(select(categories2, 
+                   name, 
+                   price, 
+                   parent_id,
+                   common_category), 
+            by="name")
+
+ggplot(x, aes(x = price, y = freq, color=common_category)) +
+  geom_point() + 
+  labs(x = "Средняя цена в категории", y = "Среднее число покупок товара(на одного клиента)") + 
+  scale_colour_discrete(name="Основная категория") + 
+  stat_function(fun=function(x) {return(400/x + 1)},
+                color="red"
+                )
+```
+
+На графике видно, что нельзя выделить определенные зависимости от основной категории. Тем не менее, общая картина (гиперболическая зависимость) позволяет сделать вывод, что более дешевые товары (не зависимо от области применения товаров) чаще заказываются в магазине.
